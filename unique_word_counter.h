@@ -6,10 +6,7 @@
 #include <vector>
 #include <unordered_set>
 #include <sstream>
-#include <future>
 #include <atomic>
-#include <array>
-#include <syncstream>
 
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -32,16 +29,12 @@ public:
             throw std::invalid_argument("Invalid or not existing filename!");
         }
 
-        const int file_descriptor = open(filename, O_RDONLY);
-        const long int file_size = lseek(file_descriptor, 0, SEEK_END);
-        const long int FILE_PAGE_BYTES = sysconf(_SC_PAGE_SIZE); // sysconf nonconstepxr
-        const long int full_pages_count = file_size / FILE_PAGE_BYTES;
+        const int file_descriptor = open(filename, O_RDONLY);           // get file descriptor
+        const long int file_size = lseek(file_descriptor, 0, SEEK_END); // get file size
+        const long int FILE_PAGE_BYTES = sysconf(_SC_PAGE_SIZE);        // get system file page in bytes
+        const long int full_pages_count = file_size / FILE_PAGE_BYTES;  // calculate how many full pages does file contains
         const size_t total_threads_to_be_spawned = file_size % FILE_PAGE_BYTES == 0 ? full_pages_count : full_pages_count + 1;
-        // std::cout << "file_size: " << file_size << " bytes" << std::endl;
-        // std::cout << "full_pages_count: " << full_pages_count << std::endl;
-        // std::cout << "total_threads_to_be_spawned: " << total_threads_to_be_spawned << std::endl;
-        const uint hardware_concurrency = std::thread::hardware_concurrency();
-        // std::cout << "hardware_concurrency: " << hardware_concurrency << std::endl;
+        const uint hardware_concurrency = std::thread::hardware_concurrency(); // get system available threats
 
         struct thread_data
         {
@@ -50,12 +43,16 @@ public:
             char *buffer;
             long long buffer_end_index;
         };
-
         std::vector<thread_data> threads;
 
         std::string front_data_for_next_thread = "";
         for (size_t i = 0; i < total_threads_to_be_spawned; i++)
         {
+            // Loop delegates mapped buffers for threads
+            // mmap might split the buffer at position that divides word, to avoid loosing potential data,
+            // the buffer will be read until last space character.
+            // Then the remaining buffer will be merged with next buffer span and calculated in next thread.
+
             char *buffer = reinterpret_cast<char *>(
                 mmap(NULL, FILE_PAGE_BYTES, PROT_READ, MAP_PRIVATE, file_descriptor, FILE_PAGE_BYTES * i));
 
@@ -95,6 +92,10 @@ public:
 
         for (size_t i = 0; i < total_threads_to_be_spawned; i++)
         {
+            // Spawn threads.
+            // Maximum number of spawned threads at once is defined by `std::thread::hardware_concurrency();`
+            // If there are already 16 working threads, program will wait with spawning more threads
+
             available_threads.wait(available_threads == 0); // wait until available threads will be other than 0
             available_threads--;                            // if unblocked "reserve" available thread to spawn
 
@@ -116,11 +117,13 @@ public:
 
                                                    std::unique_lock ul(mutex);
                                                    unique_word_map.insert(local_unique_word_map.begin(), local_unique_word_map.end());
-                                                   ul.unlock(); // unlock, lol obvious
+                                                   ul.unlock();
                                                    available_threads++;
                                                    available_threads.notify_one(); });
         }
 
+        // Wait for threads to be joined.
+        // Unmap memory(should be done without when program execution ends)
         for (size_t i = 0; i < total_threads_to_be_spawned; i++)
         {
             threads.at(i).thread.join();
